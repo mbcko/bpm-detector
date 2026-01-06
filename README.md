@@ -8,3 +8,6 @@ A simple single-page web app that estimates the tempo (beats per minute) of an u
 3. Wait a moment for the file to be decoded and analyzed; the estimated BPM will appear in the status box.
 
 All processing happens locally—your audio never leaves the browser.
+
+## GitHub Pages deployment
+A GitHub Actions workflow (`.github/workflows/pages.yml`) publishes the site to GitHub Pages whenever changes are pushed to `main` or the workflow is manually dispatched. Make sure GitHub Pages is set to "GitHub Actions" in the repository settings, then visit the environment URL from the workflow run to load `index.html`.
