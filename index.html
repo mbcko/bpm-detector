@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BPM Detector</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #0f172a;
+      color: #e2e8f0;
+    }
+
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 16px;
+    }
+
+    .card {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid #1e293b;
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 520px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin-top: 0;
+      margin-bottom: 8px;
+      font-size: 1.8rem;
+    }
+
+    p.description {
+      margin-top: 0;
+      color: #cbd5e1;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px dashed #334155;
+      border-radius: 12px;
+      background: #0b1224;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+
+    .result {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid #1e293b;
+      background: #0b1224;
+      color: #e2e8f0;
+    }
+
+    .result strong {
+      display: block;
+      font-size: 1.1rem;
+    }
+
+    .hint {
+      margin-top: 12px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+    }
+
+    .loading {
+      color: #a5b4fc;
+      font-weight: 600;
+    }
+
+    .error {
+      color: #fca5a5;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>BPM Detector</h1>
+    <p class="description">Upload an MP3 file to estimate the tempo (beats per minute) of your track.</p>
+
+    <div>
+      <label for="audio">Choose an MP3 file</label>
+      <input type="file" id="audio" accept="audio/mpeg" />
+    </div>
+
+    <div id="status" class="result" aria-live="polite">
+      <strong>Status</strong>
+      <div id="message">Waiting for a file...</div>
+    </div>
+
+    <p class="hint">Processing happens locally in your browser using the Web Audio API.</p>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('audio');
+    const statusBox = document.getElementById('status');
+    const messageEl = document.getElementById('message');
+
+    const MIN_BPM = 60;
+    const MAX_BPM = 200;
+
+    const setMessage = (text, variant = '') => {
+      messageEl.textContent = text;
+      statusBox.className = `result ${variant}`.trim();
+    };
+
+    fileInput.addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      setMessage('Loading file...', 'loading');
+      try {
+        const bpm = await analyzeFile(file);
+        if (bpm) {
+          setMessage(`Estimated tempo: ${bpm.toFixed(1)} BPM`);
+        } else {
+          setMessage('Could not detect a clear tempo. Try another track.', 'error');
+        }
+      } catch (error) {
+        console.error(error);
+        setMessage('Something went wrong while analyzing the file.', 'error');
+      }
+    });
+
+    async function analyzeFile(file) {
+      const arrayBuffer = await file.arrayBuffer();
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+      const channelData = audioBuffer.numberOfChannels > 1
+        ? averageChannels(audioBuffer)
+        : audioBuffer.getChannelData(0);
+
+      const envelope = buildAmplitudeEnvelope(channelData, audioBuffer.sampleRate);
+      return detectTempoFromEnvelope(envelope, audioBuffer.sampleRate);
+    }
+
+    function averageChannels(buffer) {
+      const length = buffer.length;
+      const channels = buffer.numberOfChannels;
+      const mix = new Float32Array(length);
+      for (let i = 0; i < channels; i++) {
+        const data = buffer.getChannelData(i);
+        for (let j = 0; j < length; j++) {
+          mix[j] += data[j] / channels;
+        }
+      }
+      return mix;
+    }
+
+    function buildAmplitudeEnvelope(samples, sampleRate) {
+      const frameSize = 1024;
+      const hopSize = 512;
+      const envelope = [];
+
+      for (let i = 0; i + frameSize < samples.length; i += hopSize) {
+        let sum = 0;
+        for (let j = 0; j < frameSize; j++) {
+          const value = samples[i + j];
+          sum += value * value;
+        }
+        envelope.push(Math.sqrt(sum / frameSize));
+      }
+
+      // Normalize and remove DC offset
+      const mean = envelope.reduce((acc, v) => acc + v, 0) / envelope.length;
+      const normalized = envelope.map((v) => v - mean);
+
+      const max = Math.max(...normalized.map((v) => Math.abs(v))) || 1;
+      return normalized.map((v) => v / max);
+    }
+
+    function detectTempoFromEnvelope(envelope, sampleRate) {
+      if (!envelope.length) return null;
+
+      const hopSize = 512;
+      const frameDuration = hopSize / sampleRate;
+
+      const minLag = Math.max(1, Math.round(60 / MAX_BPM / frameDuration));
+      const maxLag = Math.max(minLag + 1, Math.round(60 / MIN_BPM / frameDuration));
+
+      let bestLag = -1;
+      let bestCorrelation = 0;
+
+      for (let lag = minLag; lag <= maxLag; lag++) {
+        let correlation = 0;
+        for (let i = 0; i + lag < envelope.length; i++) {
+          correlation += envelope[i] * envelope[i + lag];
+        }
+        if (correlation > bestCorrelation) {
+          bestCorrelation = correlation;
+          bestLag = lag;
+        }
+      }
+
+      if (bestLag === -1 || bestCorrelation === 0) {
+        return null;
+      }
+
+      const tempo = 60 / (bestLag * frameDuration);
+      if (tempo < MIN_BPM / 2) return tempo * 2;
+      if (tempo > MAX_BPM * 2) return tempo / 2;
+      return tempo;
+    }
+  </script>
+</body>
+</html>
